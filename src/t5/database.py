@@ -329,12 +329,17 @@ class MessageDatabase:
             cursor = self.conn.cursor()
             cursor.execute("""
                 SELECT m.id, m.message_date, m.text, m.is_from_me, m.chat_id, m.is_group_chat,
-                       c.display_name as sender_name
+                       CASE 
+                           WHEN m.is_from_me THEN 'Me'
+                           ELSE c.display_name 
+                       END as sender_name
                 FROM messages m
                 JOIN contacts c ON m.contact_id = c.id
-                WHERE m.contact_id = ?
+                WHERE m.contact_id = ? OR (m.is_from_me = 1 AND m.chat_id IN (
+                    SELECT DISTINCT chat_id FROM messages WHERE contact_id = ?
+                ))
                 ORDER BY m.message_date
-            """, (contact_id,))
+            """, (contact_id, contact_id))
             
             return [
                 {
@@ -344,7 +349,7 @@ class MessageDatabase:
                     "is_from_me": bool(row[3]),
                     "chat_id": row[4],
                     "is_group_chat": bool(row[5]),
-                    "sender": "Me" if bool(row[3]) else row[6]
+                    "sender": row[6]
                 }
                 for row in cursor.fetchall()
             ]
