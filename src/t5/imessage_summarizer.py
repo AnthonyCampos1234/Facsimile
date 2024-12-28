@@ -7,6 +7,7 @@ from loguru import logger
 from database import MessageDatabase
 from summarizer_utils import MessageSummarizer
 import json
+from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
@@ -20,27 +21,32 @@ class MessageProcessor:
         """Main processing function"""
         try:
             logger.info("Starting message processing")
-
+            
+            # Export raw conversations (do this first, regardless of new messages)
+            logger.info("Exporting raw conversations...")
+            self.export_raw_conversations()
+            logger.info("Raw conversations exported successfully")
+            
             # Fetch and store new messages
             new_messages = self._fetch_new_messages()
             if not new_messages:
                 logger.info("No new messages to process")
                 return
-
+            
             # Process messages by contact
             self._process_messages_by_contact()
-
+            
             # Generate weekly summaries
             self._generate_weekly_summaries()
-
+            
             # Update identity summaries
             self._update_identity_summaries()
-
+            
             # Optimize database
             self.db.optimize_database()
-
+            
             logger.info("Message processing completed")
-
+            
         except Exception as e:
             logger.error(f"Error in message processing: {e}")
         finally:
@@ -194,6 +200,61 @@ class MessageProcessor:
 
         except Exception as e:
             logger.error(f"Error updating identity summaries: {e}")
+
+    def export_raw_conversations(self):
+        """Export raw conversations to JSON files by contact"""
+        try:
+            # Create directory for raw conversations if it doesn't exist
+            output_dir = Path.home() / "Library" / "Application Support" / "iMessage-Summarizer" / "raw_conversations"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            contacts = self.db.get_all_contacts()
+            
+            for contact in contacts:
+                messages = self.db.get_all_messages_for_contact(contact["id"])
+                if not messages:
+                    continue
+                    
+                # Group messages by day
+                conversations_by_day = {}
+                current_date = None
+                
+                for msg in sorted(messages, key=lambda x: x["date"]):  # Sort by date
+                    msg_date = msg["date"].date()
+                    
+                    if msg_date != current_date:
+                        current_date = msg_date
+                        conversations_by_day[str(current_date)] = []
+                    
+                    # Include all messages, both sent and received
+                    conversations_by_day[str(current_date)].append({
+                        "sender": "Me" if msg["is_from_me"] else contact["display_name"],
+                        "message": msg["text"],
+                        "timestamp": msg["date"].strftime("%H:%M:%S"),
+                        "is_from_me": msg["is_from_me"]  # Add this to help track message direction
+                    })
+                
+                # Format the output
+                formatted_output = {
+                    "contact_info": {
+                        "name": contact["display_name"],
+                        "identifier": contact["identifier"]
+                    },
+                    "conversations": {}
+                }
+                
+                for date, messages in conversations_by_day.items():
+                    formatted_output["conversations"][date] = messages
+                
+                # Write to file
+                output_file = output_dir / f"{contact['display_name']}_conversations.json"
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(formatted_output, f, indent=2, ensure_ascii=False)
+                
+                logger.info(f"Exported conversations for {contact['display_name']}")
+                
+        except Exception as e:
+            logger.error(f"Error exporting raw conversations: {e}")
 
 def main():
     processor = MessageProcessor()
