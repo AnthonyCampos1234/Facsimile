@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from loguru import logger
 
 from langchain.docstore.document import Document
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
 from .data_loader import DataLoader
@@ -145,12 +145,19 @@ class MessageSearchSystem:
             
         if date_range:
             start_date, end_date = date_range
-            filter_dict["created_at"] = {
-                "gte": start_date.strftime("%Y-%m-%d %H:%M:%S"),
-                "lte": end_date.strftime("%Y-%m-%d %H:%M:%S")
+            # Convert dates to timestamps
+            start_ts = int(start_date.timestamp())
+            end_ts = int(end_date.timestamp())
+            
+            # Use a day-based range with hour granularity
+            hour_range = range(start_ts, end_ts + 1, 3600)  # 3600 seconds in an hour
+            
+            # Use $in operator with hour-based range
+            filter_dict["timestamp"] = {
+                "$in": list(hour_range)[:500]  # Limit to 500 values to prevent SQL variable limit
             }
             
-        return filter_dict if filter_dict else None 
+        return filter_dict if filter_dict else None
 
     def _load_weekly_summaries(self):
         return self.data_loader.load_weekly_summaries()

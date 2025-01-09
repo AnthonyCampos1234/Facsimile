@@ -4,8 +4,8 @@ import os
 import warnings
 from datetime import datetime, timedelta
 from loguru import logger
-from database import MessageDatabase
-from summarizer_utils import MessageSummarizer
+from database.database import MessageDatabase
+from summarizer.summarizer import MessageSummarizer
 import json
 from pathlib import Path
 

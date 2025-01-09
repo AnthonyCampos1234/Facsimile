@@ -1,0 +1,7 @@
+README.md
+setup.py
+facsimile.egg-info/PKG-INFO
+facsimile.egg-info/SOURCES.txt
+facsimile.egg-info/dependency_links.txt
+facsimile.egg-info/requires.txt
+facsimile.egg-info/top_level.txt
