@@ -2,10 +2,12 @@ import os
 import getpass
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from .search_system import MessageSearchSystem
-from .response_generator import ResponseGenerator
+from src.search.search_system import MessageSearchSystem
+from src.search.response_generator import ResponseGenerator
 import sqlite3
 from pathlib import Path
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def setup_groq_api():
     """Set up GROQ API key from .env file"""
@@ -87,6 +89,10 @@ def main():
         query,
         date_range=(start_date, end_date)
     )
+    # Add date range to results for template
+    results["start_date"] = start_date.strftime("%Y-%m-%d")
+    results["end_date"] = end_date.strftime("%Y-%m-%d")
+
     response = response_gen.generate_response(
         query, 
         results,

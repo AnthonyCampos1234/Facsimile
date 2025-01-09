@@ -1,5 +1,4 @@
 from typing import List, Dict, Optional
-from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from loguru import logger
 from langchain.schema import Document
@@ -52,24 +51,33 @@ class ResponseGenerator:
         """Generate a response based on search results"""
         try:
             template = self.templates.get(response_type, self.templates["general"])
-            chain = LLMChain(llm=self.llm, prompt=template)
             
             # Format inputs based on response type
-            if response_type == "general":
-                response = chain.run({
+            if response_type == "time_specific":
+                inputs = {
+                    "time_period": f"{search_results.get('start_date', 'Unknown')} to {search_results.get('end_date', 'Unknown')}",
+                    "messages": self._format_messages(search_results.get("messages", [])),
+                    "query": query
+                }
+            else:
+                inputs = {
                     "summaries": self._format_summaries(search_results.get("summaries", [])),
                     "messages": self._format_messages(search_results.get("messages", [])),
                     "identity": self._format_identity(search_results.get("identity", [])),
                     "query": query
-                })
+                }
+            
+            # Create and invoke chain using the new pipe syntax
+            chain = template | self.llm
+            response = chain.invoke(inputs)
+            
+            # Handle different response types
+            if hasattr(response, 'content'):
+                return response.content
+            elif isinstance(response, str):
+                return response
             else:
-                response = chain.run({
-                    "time_period": search_results.get("time_period", ""),
-                    "messages": self._format_messages(search_results.get("messages", [])),
-                    "query": query
-                })
-                
-            return response
+                return str(response)
             
         except Exception as e:
             logger.error(f"Error generating response: {e}")

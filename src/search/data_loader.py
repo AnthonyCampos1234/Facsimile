@@ -16,6 +16,30 @@ class DataLoader:
         self.db_path = base_path / "messages.db"
         self.raw_conversations_path = base_path / "raw_conversations"
         
+    def _format_metadata(self, row, content_type: str) -> Dict:
+        """Format metadata with proper timestamp"""
+        try:
+            # Handle different date formats
+            date_str = str(row[4]).split('.')[0]  # Remove microseconds if present
+            created_at = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            
+            return {
+                "content_type": content_type,
+                "contact": str(row[0]),
+                "created_at": str(created_at),
+                "timestamp": int(created_at.timestamp())
+            }
+        except Exception as e:
+            logger.error(f"Error formatting metadata: {e}")
+            # Use current time as fallback
+            now = datetime.now()
+            return {
+                "content_type": content_type,
+                "contact": str(row[0]),
+                "created_at": str(now),
+                "timestamp": int(now.timestamp())
+            }
+
     def load_weekly_summaries(self) -> List[Document]:
         """Load weekly summaries from database"""
         try:
@@ -36,18 +60,28 @@ class DataLoader:
             
             docs = []
             for row in cursor.fetchall():
-                docs.append(Document(
-                    page_content=row[3],
-                    metadata={
-                        "content_type": "weekly_summary",
-                        "contact": row[0],
-                        "week_start": row[1],
-                        "week_end": row[2],
-                        "created_at": row[4]
-                    }
-                ))
+                try:
+                    metadata = self._format_metadata(row, "weekly_summary")
+                    # Clean and format dates
+                    week_start = str(row[1]).split('.')[0]
+                    week_end = str(row[2]).split('.')[0]
+                    
+                    metadata.update({
+                        "week_start": week_start,
+                        "week_end": week_end
+                    })
+                    
+                    docs.append(Document(
+                        page_content=str(row[3]),
+                        metadata=metadata
+                    ))
+                except Exception as e:
+                    logger.error(f"Error processing row {row}: {e}")
+                    continue
             
             conn.close()
+            if not docs:
+                logger.warning("No valid documents were created from weekly summaries")
             return docs
             
         except Exception as e:
@@ -133,11 +167,16 @@ class DataLoader:
             
             docs = []
             for row in cursor.fetchall():
+                # Convert message_date to timestamp
+                msg_date = datetime.strptime(row[1], "%Y-%m-%d %H:%M:%S")
+                msg_ts = int(msg_date.timestamp())
+                
                 docs.append(Document(
                     page_content=row[0],
                     metadata={
                         "content_type": "message",
-                        "timestamp": row[1],
+                        "timestamp": msg_ts,  # Use numeric timestamp
+                        "created_at": row[1],  # Keep string date for display
                         "is_from_me": bool(row[2]),
                         "contact": row[3],
                         "sender": "Me" if bool(row[2]) else row[3]

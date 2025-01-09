@@ -1,7 +1,11 @@
+# Virtual environments
+venv/
 gpt2_env/
 t5_env/
+
+# Python
 __pycache__/
 *.pyc
+
+# Environment variables
 *.env
-gpt2_env/
-t5_env/
