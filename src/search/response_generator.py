@@ -1,118 +1,53 @@
-from typing import List, Dict, Optional
-from langchain.prompts import PromptTemplate
+from typing import List, Dict
+import os
+from dotenv import load_dotenv
 from loguru import logger
-from langchain.schema import Document
+from anthropic import Anthropic
 
 class ResponseGenerator:
-    """Generates contextual responses from search results"""
-    
-    def __init__(self, llm):
-        self.llm = llm
-        self.templates = self._create_templates()
+    def __init__(self):
+        load_dotenv()
         
-    def _create_templates(self) -> Dict[str, PromptTemplate]:
-        """Create different templates for different types of responses"""
-        return {
-            "general": PromptTemplate(
-                input_variables=["summaries", "messages", "identity", "query"],
-                template="""
-                Using the following information, answer the user's query.
-                
-                Weekly Summaries: {summaries}
-                
-                Recent Messages: {messages}
-                
-                Identity Context: {identity}
-                
-                User Query: {query}
-                
-                Provide a clear, concise answer that combines high-level insights with specific details when relevant.
-                Format the response to clearly distinguish between summary information and specific message quotes.
-                """
-            ),
-            "time_specific": PromptTemplate(
-                input_variables=["time_period", "messages", "query"],
-                template="""
-                Answer the user's query about this specific time period: {time_period}
-                
-                Relevant Messages: {messages}
-                
-                Query: {query}
-                
-                Provide specific details from the messages while maintaining context.
-                """
-            )
-        }
-    
-    def generate_response(self, 
-                         query: str,
-                         search_results: Dict,
-                         response_type: str = "general") -> str:
-        """Generate a response based on search results"""
+        if "ANTHROPIC_API_KEY" not in os.environ:
+            raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
+            
+        self.client = Anthropic()
+
+    def generate_response(self, query: str, messages: List[Dict]) -> str:
+        """Generate a response to the query based on relevant messages"""
         try:
-            template = self.templates.get(response_type, self.templates["general"])
+            # Format messages chronologically
+            formatted_messages = []
+            for msg in sorted(messages, key=lambda x: x["date"]):
+                date = msg["date"]
+                sender = "Me" if msg["is_from_me"] else msg["contact_name"]
+                formatted_messages.append(f"[{date}] {sender}: {msg['text']}")
             
-            # Format inputs based on response type
-            if response_type == "time_specific":
-                inputs = {
-                    "time_period": f"{search_results.get('start_date', 'Unknown')} to {search_results.get('end_date', 'Unknown')}",
-                    "messages": self._format_messages(search_results.get("messages", [])),
-                    "query": query
-                }
-            else:
-                inputs = {
-                    "summaries": self._format_summaries(search_results.get("summaries", [])),
-                    "messages": self._format_messages(search_results.get("messages", [])),
-                    "identity": self._format_identity(search_results.get("identity", [])),
-                    "query": query
-                }
+            messages_text = "\n".join(formatted_messages)
             
-            # Create and invoke chain using the new pipe syntax
-            chain = template | self.llm
-            response = chain.invoke(inputs)
-            
-            # Handle different response types
-            if hasattr(response, 'content'):
-                return response.content
-            elif isinstance(response, str):
-                return response
-            else:
-                return str(response)
-            
+            prompt = f"""You are analyzing iMessage conversations to answer questions.
+
+Context: The following are relevant messages from a conversation history:
+
+{messages_text}
+
+Question: {query}
+
+Provide a clear and detailed answer based only on the information in the messages above. Include specific dates and quotes when relevant. If the information needed to answer the question is not in the messages, say so."""
+
+            response = self.client.messages.create(
+                model="claude-3-opus-20240229",
+                max_tokens=4096,
+                temperature=0,
+                system="You are a helpful assistant that analyzes message conversations and provides detailed, accurate answers based only on the provided message history.",
+                messages=[{
+                    "role": "user",
+                    "content": prompt
+                }]
+            )
+
+            return response.content[0].text.strip()
+
         except Exception as e:
             logger.error(f"Error generating response: {e}")
-            return "I apologize, but I encountered an error generating a response."
-    
-    def _format_summaries(self, summaries: List[Document]) -> str:
-        """Format weekly summaries for the prompt"""
-        formatted = []
-        for summary in summaries:
-            formatted.append(
-                f"Time Period: {summary.metadata.get('week_start', 'Unknown')} to {summary.metadata.get('week_end', 'Unknown')}\n"
-                f"Contact: {summary.metadata.get('contact', 'Unknown')}\n"
-                f"Summary: {summary.page_content}\n"
-            )
-        return "\n".join(formatted)
-    
-    def _format_messages(self, messages: List[Document]) -> str:
-        """Format individual messages for the prompt"""
-        formatted = []
-        for msg in messages:
-            formatted.append(
-                f"[{msg.metadata.get('timestamp', 'Unknown')}] "
-                f"{msg.metadata.get('sender', 'Unknown')}: {msg.page_content}"
-            )
-        return "\n".join(formatted)
-    
-    def _format_identity(self, identity: List[Document]) -> str:
-        """Format identity information for the prompt"""
-        if not identity:
-            return "No identity information available."
-        
-        formatted = []
-        for info in identity:
-            formatted.append(
-                f"Contact: {info.metadata.get('contact', 'Unknown')}\n"
-                f"Relationship Context: {info.page_content}"
-            )
-        return "\n".join(formatted) 
+            return f"Sorry, I encountered an error: {str(e)}" 

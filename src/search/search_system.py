@@ -1,169 +1,220 @@
-from pathlib import Path
-import sqlite3
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
-from loguru import logger
-
-from langchain.docstore.document import Document
-from langchain_huggingface import HuggingFaceEmbeddings
+import sqlite3
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain_groq import ChatGroq
-from .data_loader import DataLoader
+from langchain.docstore.document import Document
+from loguru import logger
+import os
 
 class MessageSearchSystem:
-    """Main search system integrating all iMessage-Summarizer components"""
-    
-    def __init__(self, 
-                 days_lookback: int = 30,
-                 enable_privacy_filter: bool = True):
-        # Initialize paths
-        self.base_path = Path.home() / "Library" / "Application Support" / "iMessage-Summarizer"
-        self.db_path = self.base_path / "messages.db"
-        self.raw_conversations_path = self.base_path / "raw_conversations"
-        
-        # Settings
-        self.days_lookback = days_lookback
-        self.enable_privacy_filter = enable_privacy_filter
-        
-        # Initialize components
-        self.embedding_model = HuggingFaceEmbeddings(
+    def __init__(self):
+        # Initialize embeddings model
+        self.embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
         
-        self.llm = ChatGroq(
-            model="mixtral-8x7b-32768",
-            temperature=0
-        )
+        # Use absolute path to database
+        self.db_path = os.path.expanduser("~/Library/Application Support/iMessage-Summarizer/messages.db")
+        logger.info(f"Using database at: {self.db_path}")
         
-        # Initialize DataLoader first
-        self.data_loader = DataLoader(self.base_path)
-        
-        # Then initialize stores
-        self.stores = self._initialize_stores()
-        
-    def _initialize_stores(self) -> Dict:
-        """Initialize all vector stores"""
-        return {
-            "weekly_summaries": self._create_summary_store(),
-            "identity_summaries": self._create_identity_store(),
-            "messages": self._create_message_store(),
-        }
-    
-    def _create_summary_store(self) -> Chroma:
-        """Create vector store for weekly summaries"""
-        docs = self._load_weekly_summaries()
-        return Chroma.from_documents(
-            documents=docs,
-            embedding=self.embedding_model,
-            collection_name="weekly_summaries"
-        )
-    
-    def _create_identity_store(self) -> Chroma:
-        """Create vector store for identity summaries"""
-        docs = self._load_identity_summaries()
-        return Chroma.from_documents(
-            documents=docs,
-            embedding=self.embedding_model,
-            collection_name="identity_summaries"
-        )
-    
-    def _create_message_store(self) -> Chroma:
-        """Create vector store for recent messages"""
-        docs = self._load_recent_messages()
-        return Chroma.from_documents(
-            documents=docs,
-            embedding=self.embedding_model,
-            collection_name="messages"
-        )
+        if not os.path.exists(self.db_path):
+            raise FileNotFoundError(f"Database not found at {self.db_path}")
+            
+        # Initialize vector store
+        self.vectorstore = None
+        self._initialize_vectorstore()
 
-    def search(self, 
-              query: str, 
-              contact: Optional[str] = None,
-              date_range: Optional[tuple] = None,
-              k: int = 3) -> Dict:
-        """
-        Perform a hierarchical search across all data types
-        """
+    def _initialize_vectorstore(self):
+        """Load messages and create vector store"""
         try:
-            results = {
-                "summaries": [],
-                "identity": [],
-                "messages": []
-            }
+            # Get messages from SQLite
+            messages = self._get_all_messages()
+            logger.info(f"Retrieved {len(messages)} messages from database")
             
-            # First, search weekly summaries
-            try:
-                summary_results = self.stores["weekly_summaries"].similarity_search(
-                    query,
-                    k=k,
-                    filter=self._create_filter(contact, date_range)
+            if not messages:
+                logger.error("No messages found in database")
+                raise ValueError("No messages found in database")
+                
+            # Convert to documents
+            docs = []
+            for msg in messages:
+                # Convert date string to timestamp
+                date_obj = datetime.strptime(msg["date"], "%Y-%m-%d %H:%M:%S")
+                
+                doc = Document(
+                    page_content=msg["text"],
+                    metadata={
+                        "date": date_obj.timestamp(),  # Store as timestamp
+                        "date_str": msg["date"],  # Keep string version for display
+                        "contact_name": msg["contact_name"],
+                        "is_from_me": msg["is_from_me"]
+                    }
                 )
-                results["summaries"] = summary_results
-            except Exception as e:
-                logger.warning(f"Error searching weekly summaries: {e}")
+                docs.append(doc)
+                
+            logger.info(f"Created {len(docs)} documents for vector store")
             
-            # Then search identity summaries
-            try:
-                identity_results = self.stores["identity_summaries"].similarity_search(
-                    query,
-                    k=1,
-                    filter={"contact": contact} if contact else None
-                )
-                results["identity"] = identity_results
-            except Exception as e:
-                logger.warning(f"Error searching identity summaries: {e}")
-            
-            # Finally, search specific messages
-            try:
-                message_results = self.stores["messages"].similarity_search(
-                    query,
-                    k=k*2,  # Get more message results for context
-                    filter=self._create_filter(contact, date_range)
-                )
-                results["messages"] = message_results
-            except Exception as e:
-                logger.warning(f"Error searching messages: {e}")
-            
-            return results
+            if not docs:
+                logger.error("No valid documents to create vector store")
+                raise ValueError("No valid documents to create vector store")
+
+            # Create vector store
+            self.vectorstore = Chroma.from_documents(
+                documents=docs,
+                embedding=self.embeddings
+            )
             
         except Exception as e:
-            logger.error(f"Error performing search: {e}")
-            return {
-                "summaries": [],
-                "identity": [],
-                "messages": []
-            }
+            logger.error(f"Error initializing vector store: {e}")
+            raise
 
-    def _create_filter(self, 
-                      contact: Optional[str] = None, 
-                      date_range: Optional[tuple] = None) -> Dict:
-        """Create filter dict for vector store queries"""
-        filter_dict = {}
+    def _get_all_messages(self) -> List[Dict]:
+        """Get all messages from SQLite DB"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # First check if we can connect and if tables exist
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = cursor.fetchall()
+            logger.info(f"Found tables: {tables}")
+            
+            query = """
+            SELECT 
+                m.text,
+                m.message_date,
+                CASE 
+                    WHEN m.is_from_me = 1 THEN 'Me'
+                    ELSE c.display_name 
+                END as sender_name,
+                m.is_from_me
+            FROM messages m
+            LEFT JOIN contacts c ON m.contact_id = c.id
+            WHERE m.text IS NOT NULL
+            AND LENGTH(TRIM(m.text)) > 0  -- Skip empty/whitespace messages
+            ORDER BY m.message_date DESC
+            """
+            
+            cursor.execute(query)
+            messages = []
+            for row in cursor.fetchall():
+                messages.append({
+                    "text": row[0],
+                    "date": row[1],
+                    "contact_name": row[2],
+                    "is_from_me": bool(row[3])
+                })
+            
+            logger.info(f"Retrieved {len(messages)} messages")
+            
+            # Log a sample message for debugging
+            if messages:
+                logger.debug(f"Sample message: {messages[0]}")
+                
+            conn.close()
+            return messages
+            
+        except sqlite3.Error as e:
+            logger.error(f"Database error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Error getting messages: {e}")
+            raise
+
+    def search_messages(
+        self,
+        query: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        k: int = 5
+    ) -> List[Dict]:
+        """Search messages using vector similarity"""
+        try:
+            # Extract name from query for filtering
+            name = query.split("with ")[-1].split()[0].lower()
+            logger.debug(f"Searching for messages with name: {name}")
+            
+            # Get messages directly from database for the time period
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # If start_date not provided, use last 7 days
+            if not start_date:
+                start_date = datetime.now() - timedelta(days=7)
+            if not end_date:
+                end_date = datetime.now()
+            
+            query = """
+            WITH target_contact AS (
+                SELECT id, display_name 
+                FROM contacts 
+                WHERE LOWER(display_name) LIKE ?
+            ),
+            target_chats AS (
+                -- Get all chats involving the target contact
+                SELECT DISTINCT chat_id
+                FROM messages
+                WHERE contact_id IN (SELECT id FROM target_contact)
+            ),
+            conversation_messages AS (
+                -- Get all messages from those chats
+                SELECT 
+                    m.text,
+                    m.message_date,
+                    m.is_from_me,
+                    CASE 
+                        WHEN m.is_from_me = 1 THEN 'Me'
+                        ELSE c.display_name 
+                    END as sender_name
+                FROM messages m
+                LEFT JOIN contacts c ON m.contact_id = c.id
+                WHERE m.chat_id IN (SELECT chat_id FROM target_chats)
+                AND m.message_date BETWEEN ? AND ?
+            )
+            SELECT DISTINCT *
+            FROM conversation_messages
+            ORDER BY message_date
+            """
+            
+            cursor.execute(query, (
+                f"%{name}%",
+                start_date.strftime("%Y-%m-%d %H:%M:%S"),
+                end_date.strftime("%Y-%m-%d %H:%M:%S")
+            ))
+            
+            messages = []
+            for row in cursor.fetchall():
+                messages.append({
+                    "text": row[0],
+                    "date": row[1],
+                    "contact_name": row[3],
+                    "is_from_me": bool(row[2])
+                })
+                logger.debug(f"Found message: {row[0]} from {row[3]}")
+            
+            conn.close()
+            
+            logger.info(f"Found {len(messages)} relevant messages")
+            return messages[:k*2]
+            
+        except Exception as e:
+            logger.error(f"Error searching messages: {e}")
+            return []
+
+    def _build_date_filter(self, start_date: Optional[datetime], end_date: Optional[datetime]):
+        """Build date filter for vector store query"""
+        if not start_date and not end_date:
+            return None
+            
+        date_filter = {}
+        if start_date:
+            # Convert to timestamp for Chroma's filtering
+            date_filter["date"] = {"$gte": start_date.timestamp()}
+        if end_date:
+            if "date" in date_filter:
+                date_filter["date"]["$lte"] = end_date.timestamp()
+            else:
+                date_filter["date"] = {"$lte": end_date.timestamp()}
         
-        if contact:
-            filter_dict["contact"] = contact
-            
-        if date_range:
-            start_date, end_date = date_range
-            # Convert dates to timestamps
-            start_ts = int(start_date.timestamp())
-            end_ts = int(end_date.timestamp())
-            
-            # Use a day-based range with hour granularity
-            hour_range = range(start_ts, end_ts + 1, 3600)  # 3600 seconds in an hour
-            
-            # Use $in operator with hour-based range
-            filter_dict["timestamp"] = {
-                "$in": list(hour_range)[:500]  # Limit to 500 values to prevent SQL variable limit
-            }
-            
-        return filter_dict if filter_dict else None
-
-    def _load_weekly_summaries(self):
-        return self.data_loader.load_weekly_summaries()
-
-    def _load_identity_summaries(self):
-        return self.data_loader.load_identity_summaries()
-
-    def _load_recent_messages(self):
-        return self.data_loader.load_recent_messages(self.days_lookback) 
+        return date_filter 

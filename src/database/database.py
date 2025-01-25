@@ -17,44 +17,29 @@ class MessageDatabase:
         app_dir.mkdir(parents=True, exist_ok=True)
         
         self.db_path = app_dir / "messages.db"
-        self.conn = None
+        # Initialize connection
+        self.conn = sqlite3.connect(self.db_path)
         self.setup_database()
 
     def setup_database(self):
-        """Initialize database with required tables"""
+        """Initialize database tables"""
         try:
-            self.conn = sqlite3.connect(self.db_path)
             cursor = self.conn.cursor()
-
-            # Create tables
+            
             cursor.executescript("""
                 CREATE TABLE IF NOT EXISTS contacts (
                     id INTEGER PRIMARY KEY,
-                    identifier TEXT UNIQUE,
-                    display_name TEXT,
-                    first_seen_date DATETIME,
-                    last_updated DATETIME
+                    phone_number TEXT UNIQUE,
+                    display_name TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY,
                     contact_id INTEGER,
-                    message_date DATETIME,
                     text TEXT,
+                    message_date DATETIME,
                     is_from_me BOOLEAN,
-                    chat_id TEXT,
-                    is_group_chat BOOLEAN,
                     processed_in_summary BOOLEAN DEFAULT FALSE,
-                    FOREIGN KEY (contact_id) REFERENCES contacts(id)
-                );
-
-                CREATE TABLE IF NOT EXISTS weekly_conversation_summaries (
-                    id INTEGER PRIMARY KEY,
-                    contact_id INTEGER,
-                    week_start_date DATE,
-                    week_end_date DATE,
-                    summary_text TEXT,
-                    created_at DATETIME,
                     FOREIGN KEY (contact_id) REFERENCES contacts(id)
                 );
 
@@ -62,22 +47,31 @@ class MessageDatabase:
                     id INTEGER PRIMARY KEY,
                     contact_id INTEGER,
                     summary_text TEXT,
-                    created_at DATETIME,
                     personality_traits TEXT,
                     relationship_context TEXT,
                     common_topics TEXT,
                     confidence_scores TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (contact_id) REFERENCES contacts(id)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(message_date);
-                CREATE INDEX IF NOT EXISTS idx_messages_contact ON messages(contact_id);
-                CREATE INDEX IF NOT EXISTS idx_messages_processed ON messages(processed_in_summary);
+                -- Drop existing weekly_conversation_summaries if it exists
+                DROP TABLE IF EXISTS weekly_conversation_summaries;
+                
+                CREATE TABLE weekly_conversation_summaries (
+                    id INTEGER PRIMARY KEY,
+                    contact_id INTEGER,
+                    week_start_date DATE,
+                    week_end_date DATE,
+                    summary_text TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (contact_id) REFERENCES contacts(id)
+                );
             """)
-
+            
             self.conn.commit()
             logger.info("Database initialized successfully")
-
+            
         except Exception as e:
             logger.error(f"Error setting up database: {e}")
             raise
@@ -162,20 +156,20 @@ class MessageDatabase:
             
             # First, ensure contact exists
             cursor.execute("""
-                INSERT OR IGNORE INTO contacts (identifier, display_name, first_seen_date, last_updated)
-                VALUES (?, ?, ?, ?)
-            """, (contact_identifier, display_name, datetime.now(), datetime.now()))
+                INSERT OR IGNORE INTO contacts (phone_number, display_name)
+                VALUES (?, ?)
+            """, (contact_identifier, display_name))
             
             # Get contact_id
-            cursor.execute("SELECT id FROM contacts WHERE identifier = ?", (contact_identifier,))
+            cursor.execute("SELECT id FROM contacts WHERE phone_number = ?", (contact_identifier,))
             contact_id = cursor.fetchone()[0]
             
             # Store message
             cursor.execute("""
                 INSERT OR IGNORE INTO messages 
-                (contact_id, message_date, text, is_from_me, chat_id, is_group_chat)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (contact_id, message_date, text, is_from_me, chat_id, is_group_chat))
+                (contact_id, message_date, text, is_from_me)
+                VALUES (?, ?, ?, ?)
+            """, (contact_id, message_date, text, is_from_me))
             
             self.conn.commit()
             
@@ -282,7 +276,7 @@ class MessageDatabase:
         try:
             cursor = self.conn.cursor()
             cursor.execute("""
-                SELECT id, identifier, display_name 
+                SELECT id, phone_number, display_name 
                 FROM contacts
             """)
             return [
@@ -298,8 +292,12 @@ class MessageDatabase:
         try:
             cursor = self.conn.cursor()
             cursor.execute("""
-                SELECT m.id, m.message_date, m.text, m.is_from_me, m.chat_id, m.is_group_chat,
-                       c.display_name as sender_name
+                SELECT 
+                    m.id,
+                    m.message_date,
+                    m.text,
+                    m.is_from_me,
+                    c.display_name
                 FROM messages m
                 JOIN contacts c ON m.contact_id = c.id
                 WHERE m.contact_id = ?
@@ -313,9 +311,7 @@ class MessageDatabase:
                     "date": datetime.strptime(row[1], "%Y-%m-%d %H:%M:%S"),
                     "text": row[2],
                     "is_from_me": bool(row[3]),
-                    "chat_id": row[4],
-                    "is_group_chat": bool(row[5]),
-                    "sender": "Me" if bool(row[3]) else row[6]
+                    "sender": "Me" if row[3] else row[4]
                 }
                 for row in cursor.fetchall()
             ]
@@ -328,18 +324,17 @@ class MessageDatabase:
         try:
             cursor = self.conn.cursor()
             cursor.execute("""
-                SELECT m.id, m.message_date, m.text, m.is_from_me, m.chat_id, m.is_group_chat,
-                       CASE 
-                           WHEN m.is_from_me THEN 'Me'
-                           ELSE c.display_name 
-                       END as sender_name
+                SELECT 
+                    m.id,
+                    m.message_date,
+                    m.text,
+                    m.is_from_me,
+                    c.display_name
                 FROM messages m
                 JOIN contacts c ON m.contact_id = c.id
-                WHERE m.contact_id = ? OR (m.is_from_me = 1 AND m.chat_id IN (
-                    SELECT DISTINCT chat_id FROM messages WHERE contact_id = ?
-                ))
+                WHERE m.contact_id = ?
                 ORDER BY m.message_date
-            """, (contact_id, contact_id))
+            """, (contact_id,))
             
             return [
                 {
@@ -347,9 +342,7 @@ class MessageDatabase:
                     "date": datetime.strptime(row[1], "%Y-%m-%d %H:%M:%S"),
                     "text": row[2],
                     "is_from_me": bool(row[3]),
-                    "chat_id": row[4],
-                    "is_group_chat": bool(row[5]),
-                    "sender": row[6]
+                    "sender": "Me" if row[3] else row[4]
                 }
                 for row in cursor.fetchall()
             ]

@@ -4,10 +4,19 @@ import os
 import warnings
 from datetime import datetime, timedelta
 from loguru import logger
-from database.database import MessageDatabase
-from summarizer.summarizer import MessageSummarizer
+from src.database.database import MessageDatabase
+from .summarizer import MessageSummarizer
 import json
 from pathlib import Path
+from dotenv import load_dotenv
+import time
+
+# Load environment variables at startup
+load_dotenv()
+
+# Verify API key is present
+if "ANTHROPIC_API_KEY" not in os.environ:
+    raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
 
 warnings.filterwarnings("ignore")
 
@@ -31,16 +40,17 @@ class MessageProcessor:
             new_messages = self._fetch_new_messages()
             if not new_messages:
                 logger.info("No new messages to process")
-                return
             
             # Process messages by contact
             self._process_messages_by_contact()
             
-            # Generate weekly summaries
-            self._generate_weekly_summaries()
-            
-            # Update identity summaries
+            # Update identity summaries first (since they're more important)
+            logger.info("Updating identity summaries...")
             self._update_identity_summaries()
+            
+            # Then generate weekly summaries
+            logger.info("Generating weekly summaries...")
+            self._generate_weekly_summaries()
             
             # Optimize database
             self.db.optimize_database()
@@ -168,35 +178,70 @@ class MessageProcessor:
         """Update identity summaries for each contact"""
         try:
             contacts = self.db.get_all_contacts()
-
+            logger.info(f"Found {len(contacts)} contacts to process for identity summaries")
+            
+            # Get message counts for each contact
+            contact_messages = {}
             for contact in contacts:
                 messages = self.db.get_all_messages_for_contact(contact["id"])
+                contact_messages[contact["id"]] = len(messages)
+            
+            # Sort contacts by message count and only process those with > 5 messages
+            contacts_to_process = [
+                contact for contact in contacts 
+                if contact_messages[contact["id"]] > 5
+            ]
+            
+            total = len(contacts_to_process)
+            logger.info(f"Processing {total} contacts with significant message history")
 
-                if messages:
-                    logger.info(f"Updating identity summary for: {contact['display_name']}")
+            for idx, contact in enumerate(contacts_to_process, 1):
+                try:
+                    logger.info(f"Processing {idx}/{total}: {contact['display_name']}")
+                    messages = self.db.get_all_messages_for_contact(contact["id"])
+                    msg_count = len(messages)
+                    logger.info(f"Found {msg_count} messages for {contact['display_name']}")
 
-                    previous_summary = self.db.get_latest_identity_summary(contact["id"])
+                    if messages:
+                        previous_summary = self.db.get_latest_identity_summary(contact["id"])
+                        logger.info(f"Previous summary exists: {previous_summary is not None}")
 
-                    summary, analysis = self.summarizer.generate_identity_summary(
-                        messages,
-                        previous_summary["summary_text"] if previous_summary else None
-                    )
-
-                    if summary and analysis:
-                        confidence_scores = {
-                            "personality": analysis.get("personality_confidence", 0.0),
-                            "relationship": analysis.get("relationship_confidence", 0.0),
-                            "topics": analysis.get("topics_confidence", 0.0)
-                        }
-
-                        self.db.store_identity_summary(
-                            contact["id"],
-                            summary,
-                            analysis["personality_traits"],
-                            analysis["relationship_context"],
-                            analysis["common_topics"],
-                            json.dumps(confidence_scores)
+                        summary, analysis = self.summarizer.generate_identity_summary(
+                            messages,
+                            previous_summary["summary_text"] if previous_summary else None
                         )
+
+                        if summary and analysis:
+                            logger.info(f"Generated new summary for {contact['display_name']}")
+                            confidence_scores = {
+                                "personality": analysis.get("personality_confidence", 0.0),
+                                "relationship": analysis.get("relationship_confidence", 0.0),
+                                "topics": analysis.get("topics_confidence", 0.0)
+                            }
+
+                            self.db.store_identity_summary(
+                                contact["id"],
+                                summary,
+                                analysis.get("personality_traits", {}),
+                                analysis.get("relationship_context", {}),
+                                analysis.get("common_topics", []),
+                                json.dumps(confidence_scores)
+                            )
+                            logger.info(f"Stored identity summary for {contact['display_name']}")
+                            
+                            # Add delay between contacts to help with rate limits
+                            if idx < total:  # Don't sleep after last contact
+                                logger.info(f"Waiting 10 seconds before next contact...")
+                                time.sleep(10)
+                        else:
+                            logger.warning(f"No summary/analysis generated for {contact['display_name']}")
+                    else:
+                        logger.warning(f"No messages found for {contact['display_name']}")
+
+                except Exception as e:
+                    logger.error(f"Error processing identity summary for {contact['display_name']}: {e}")
+                    time.sleep(30)  # Longer delay on error
+                    continue
 
         except Exception as e:
             logger.error(f"Error updating identity summaries: {e}")

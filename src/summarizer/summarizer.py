@@ -1,207 +1,229 @@
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
 import json
-from datetime import datetime, timedelta
-from typing import List, Dict, Tuple
+import os
+import time
+from dotenv import load_dotenv
 from loguru import logger
-from transformers import (
-    AutoTokenizer, 
-    AutoModelForSeq2SeqLM, 
-    AutoModelForSequenceClassification,
-    pipeline
-)
+from anthropic import Anthropic
 
 class MessageSummarizer:
+    """Handles message summarization using Claude"""
+    
     def __init__(self):
-        logger.info("Initializing summarization models...")
+        # Load environment variables
+        load_dotenv()
         
-        # Load conversation summarization model
-        self.conv_tokenizer = AutoTokenizer.from_pretrained("philschmid/bart-large-cnn-samsum")
-        self.conv_model = AutoModelForSeq2SeqLM.from_pretrained("philschmid/bart-large-cnn-samsum")
+        # Verify API key is present
+        if "ANTHROPIC_API_KEY" not in os.environ:
+            raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
+            
+        self.client = Anthropic()
         
-        # Load personality analysis model
-        self.personality_tokenizer = AutoTokenizer.from_pretrained("facebook/bart-large-mnli")
-        self.personality_model = AutoModelForSequenceClassification.from_pretrained("facebook/bart-large-mnli")
-        
-        # Create personality analysis pipeline
-        self.personality_pipeline = pipeline(
-            "zero-shot-classification",
-            model="facebook/bart-large-mnli",
-            tokenizer="facebook/bart-large-mnli"
-        )
-        
-        logger.info("Models loaded successfully")
+        # Rate limiting settings - Claude has much higher limits
+        self.requests_per_minute = 50  
+        self.min_delay = 60 / self.requests_per_minute
+        self.last_request_time = 0
+        self.backoff_time = 2  # Initial backoff time in seconds
 
-    def generate_weekly_summary(self, messages: List[Dict]) -> str:
-        """Generate a summary of conversations for a week"""
+    def _rate_limit(self, estimated_tokens: int = 1000):
+        """Implement rate limiting with exponential backoff"""
+        current_time = time.time()
+        
         try:
-            # Format messages for summarization
-            conversation = self._format_messages_for_summary(messages)
+            # Apply request rate limiting
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < self.min_delay:
+                sleep_time = self.min_delay - time_since_last + self.backoff_time
+                logger.info(f"Request rate limiting: sleeping for {sleep_time:.2f} seconds")
+                time.sleep(sleep_time)
             
-            # Generate summary
-            inputs = self.conv_tokenizer(
-                conversation,
-                max_length=1024,
-                truncation=True,
-                padding="longest",
-                return_tensors="pt"
-            )
-            
-            summary_ids = self.conv_model.generate(
-                inputs["input_ids"],
-                max_length=500,  # 500 words as requested
-                min_length=200,
-                num_beams=4,
-                length_penalty=2.0,
-                early_stopping=True
-            )
-            
-            summary = self.conv_tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-            return summary
+            self.last_request_time = time.time()
             
         except Exception as e:
-            logger.error(f"Error generating weekly summary: {e}")
-            return ""
+            logger.error(f"Error in rate limiting: {e}")
+            time.sleep(5)  # Default sleep on error
 
-    def analyze_personality(self, messages: List[Dict]) -> Dict:
-        """Analyze personality traits and relationship dynamics"""
+    def generate_identity_summary(self, messages: List[Dict], previous_summary: Optional[str] = None) -> Tuple[str, Dict]:
+        """Generate identity summary from messages"""
         try:
-            # Combine messages for analysis
-            text = " ".join([msg["text"] for msg in messages])
-            
-            # Personality traits to analyze
-            traits = [
-                "friendly", "professional", "formal", "casual", "emotional",
-                "analytical", "supportive", "demanding", "humorous", "serious"
-            ]
-            
-            # Relationship contexts to analyze
-            contexts = [
-                "close friend", "family member", "professional contact",
-                "acquaintance", "romantic interest", "mentor/mentee"
-            ]
-            
-            # Analyze personality traits
-            trait_results = self.personality_pipeline(
-                text,
-                candidate_labels=traits,
-                multi_label=True
-            )
-            
-            # Analyze relationship context
-            context_results = self.personality_pipeline(
-                text,
-                candidate_labels=contexts,
-                multi_label=False
-            )
-            
-            # Extract common topics
-            topics = self._extract_common_topics(messages)
-            
-            return {
-                "personality_traits": {
-                    label: score 
-                    for label, score in zip(trait_results["labels"], trait_results["scores"])
-                    if score > 0.5  # Only include confident predictions
-                },
-                "relationship_context": {
-                    context_results["labels"][0]: context_results["scores"][0]
-                },
-                "common_topics": topics
-            }
-            
-        except Exception as e:
-            logger.error(f"Error analyzing personality: {e}")
-            return {
-                "personality_traits": {},
-                "relationship_context": {"unknown": 0.0},
-                "common_topics": {}
-            }
+            if not messages:
+                return "", {}
 
-    def _format_messages_for_summary(self, messages: List[Dict]) -> str:
-        """Format messages for the summarization model"""
-        formatted = []
-        for msg in messages:
-            sender = "Me" if msg["is_from_me"] else msg["sender"]
-            formatted.append(f"{sender}: {msg['text']}")
-        return "\n".join(formatted)
+            # Sort messages by date
+            messages = sorted(messages, key=lambda x: x["date"])
+            
+            # Take samples for conversations with more than 50 messages
+            if len(messages) > 50:
+                sampled_messages = []
+                chunk_size = len(messages) // 5  # Split into 5 chunks
+                
+                for i in range(0, len(messages), chunk_size):
+                    chunk = messages[i:i + chunk_size]
+                    sample_size = min(3, len(chunk))
+                    sampled_messages.extend(chunk[:sample_size])
+                
+                messages = sampled_messages[:15]  # Cap at 15 total messages
+                logger.info(f"Sampled {len(messages)} messages for analysis")
 
-    def _format_messages_for_analysis(self, messages: List[Dict]) -> str:
-        """Format messages for personality analysis"""
-        # Combine all messages with context
-        return " ".join([msg["text"] for msg in messages])
+            # Apply rate limiting
+            self._rate_limit()
 
-    def _extract_common_topics(self, messages: List[Dict]) -> Dict[str, float]:
-        """Extract and score common conversation topics"""
-        try:
-            # Common topics to look for
-            topics = [
-                "work", "family", "hobbies", "travel", "food",
-                "entertainment", "sports", "technology", "education",
-                "personal life", "future plans", "shared memories"
-            ]
+            # Format messages for the prompt
+            formatted_messages = self._format_messages(messages)
             
-            # Combine messages
-            text = self._format_messages_for_analysis(messages)
-            
-            # Analyze topics
-            results = self.personality_pipeline(
-                text,
-                candidate_labels=topics,
-                multi_label=True
-            )
-            
-            return {
-                label: score 
-                for label, score in zip(results["labels"], results["scores"])
-                if score > 0.3  # Include topics with reasonable confidence
-            }
-            
-        except Exception as e:
-            logger.error(f"Error extracting topics: {e}")
-            return {}
+            prompt = f"""You are a conversation analyzer. Analyze the following messages and return a JSON object.
 
-    def generate_identity_summary(self, messages: List[Dict], previous_summary: str = None) -> Tuple[str, Dict]:
-        """Generate or update identity summary with confidence scores"""
-        try:
-            # Analyze personality and get confidence score
-            analysis = self.analyze_personality(messages)
-            
-            # Create summary prompt with previous context if available
-            prompt = (
-                "Based on their messages, this person is "
-                f"{', '.join(analysis['personality_traits'].keys())}. "
-                f"They appear to be a {list(analysis['relationship_context'].keys())[0]}. "
-                f"Common topics of discussion include {', '.join(analysis['common_topics'].keys())}."
+Previous Summary: {previous_summary if previous_summary else 'None'}
+
+Messages to analyze:
+{formatted_messages}
+
+Return your analysis in the following JSON format with no additional text or explanation:
+
+{{
+    "summary": "A detailed identity summary describing the person's identity, personality, and relationship dynamics",
+    "personality_traits": {{
+        "trait1": 0.8,
+        "trait2": 0.6
+    }},
+    "relationship_context": {{
+        "context1": 0.9,
+        "context2": 0.7
+    }},
+    "common_topics": [
+        "topic1",
+        "topic2",
+        "topic3"
+    ]
+}}"""
+
+            # Add debug print to see raw response
+            print("\nRAW PROMPT:", prompt)
+
+            response = self.client.messages.create(
+                model="claude-3-opus-20240229",
+                max_tokens=4096,
+                temperature=0,
+                system="You are a conversation analyzer that returns analysis in JSON format only.",
+                messages=[{
+                    "role": "user",
+                    "content": prompt
+                }]
             )
             
-            if previous_summary:
-                prompt = f"Previous summary: {previous_summary}\nNew analysis: {prompt}"
+            # Extract just the JSON part from Claude's response
+            response_text = response.content[0].text
             
-            # Generate narrative summary
-            inputs = self.conv_tokenizer(
-                prompt,
-                max_length=1024,
-                truncation=True,
-                return_tensors="pt"
-            )
+            # Add debug print
+            print("\nRAW RESPONSE:", response_text)
             
-            summary_ids = self.conv_model.generate(
-                inputs["input_ids"],
-                max_length=300,
-                min_length=100,
-                num_beams=4,
-                length_penalty=2.0,
-                early_stopping=True
-            )
-            
-            summary = self.conv_tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-            
-            # Add confidence scores to analysis
-            analysis["personality_confidence"] = sum(analysis["personality_traits"].values()) / len(analysis["personality_traits"])
-            analysis["relationship_confidence"] = list(analysis["relationship_context"].values())[0]
-            analysis["topics_confidence"] = sum(analysis["common_topics"].values()) / len(analysis["common_topics"])
-            
-            return summary, analysis
-            
+            # Try to find JSON in the response
+            try:
+                # Look for JSON between triple backticks if present
+                if "```json" in response_text:
+                    json_str = response_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in response_text:
+                    json_str = response_text.split("```")[1].strip()
+                else:
+                    json_str = response_text.strip()
+                
+                # Add debug print
+                print("\nEXTRACTED JSON:", json_str)
+                
+                analysis = json.loads(json_str)
+                
+                # Verify required fields
+                required_fields = ["summary", "personality_traits", "relationship_context", "common_topics"]
+                if not all(field in analysis for field in required_fields):
+                    raise ValueError("Missing required fields in response")
+                    
+                return analysis["summary"], analysis
+                
+            except Exception as e:
+                logger.error(f"Error parsing JSON response: {e}")
+                logger.debug(f"Attempted to parse: {response_text}")
+                return "", {}
+
         except Exception as e:
             logger.error(f"Error generating identity summary: {e}")
             return "", {}
+
+    def _format_messages(self, messages: List[Dict]) -> str:
+        """Format messages for prompt input"""
+        formatted = []
+        for msg in messages:
+            date = msg["date"] if isinstance(msg["date"], str) else msg["date"].strftime("%Y-%m-%d %H:%M:%S")
+            sender = "Me" if msg["is_from_me"] else "Other"
+            formatted.append(f"[{date}] {sender}: {msg['text']}")
+        return "\n".join(formatted)
+
+    def generate_weekly_summary(self, messages: List[Dict]) -> str:
+        """Generate a summary of messages for a week"""
+        try:
+            if not messages:
+                return ""
+
+            # Apply rate limiting
+            self._rate_limit()
+
+            # Format messages for the prompt
+            formatted_messages = self._format_messages(messages)
+            
+            prompt = f"""You are a conversation analyzer. Create a weekly summary of these messages.
+
+Messages to analyze:
+{formatted_messages}
+
+Return your analysis in the following JSON format with no additional text:
+
+{{
+    "weekly_summary": "A concise summary of the week's conversations, including key topics, events, and patterns",
+    "key_events": [
+        "event1",
+        "event2"
+    ],
+    "topics_discussed": [
+        "topic1",
+        "topic2"
+    ],
+    "overall_tone": "Description of the conversation tone"
+}}"""
+
+            response = self.client.messages.create(
+                model="claude-3-opus-20240229",
+                max_tokens=4096,
+                temperature=0,
+                system="You are a conversation analyzer that returns analysis in JSON format only.",
+                messages=[{
+                    "role": "user",
+                    "content": prompt
+                }]
+            )
+
+            # Extract just the JSON part from Claude's response
+            response_text = response.content[0].text
+            
+            # Try to find JSON in the response
+            try:
+                # Look for JSON between triple backticks if present
+                if "```json" in response_text:
+                    json_str = response_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in response_text:
+                    json_str = response_text.split("```")[1].strip()
+                else:
+                    json_str = response_text.strip()
+                
+                analysis = json.loads(json_str)
+                
+                # Return just the summary text
+                return analysis.get("weekly_summary", "")
+
+            except Exception as e:
+                logger.error(f"Error parsing weekly summary JSON: {e}")
+                logger.debug(f"Attempted to parse: {response_text}")
+                return ""
+
+        except Exception as e:
+            logger.error(f"Error generating weekly summary: {e}")
+            return ""
