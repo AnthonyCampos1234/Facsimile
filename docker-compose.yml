@@ -1,35 +1,20 @@
-version: '3.8'
+version: "3.8"
 
 services:
   backend:
     build:
       context: ./backend
     ports:
-      - "3000:3000"
+      - "3001:3001"
     volumes:
       - ./backend:/app
       - /app/node_modules
     environment:
       - NODE_ENV=development
-      - PORT=3000
+      - PORT=3001
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/facsimile
     depends_on:
       - postgres
-    networks:
-      - facsimile-network
-
-  frontend:
-    build:
-      context: ./frontend
-    ports:
-      - "80:80"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      - REACT_APP_API_URL=http://localhost:3000
-    depends_on:
-      - backend
     networks:
       - facsimile-network
 
