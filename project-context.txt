@@ -1,0 +1,57 @@
+# Project Context: Personal Context Hub Web Application
+
+## Project Overview
+This project is a web application designed to serve as the "Plaid for personal context," 
+enabling large language models (LLMs) to understand a user's personal context by integrating 
+data from their Gmail, Google Calendar, and financial accounts via Plaid. The goal is to 
+provide a secure, scalable, and privacy-focused platform where users can connect their accounts, 
+process their data, and allow LLMs to access this information via Retrieval-Augmented Generation 
+(RAG) for context-aware responses.
+
+The application includes a cloud-based temporary vector database 
+(using Qdrant) to store data embeddings, dual privacy options for users 
+(Raw Data vs. Summarized/Anonymized Data), and integration with third-party APIs and 
+LLMs (e.g., OpenAI). It prioritizes user control, data security, and compliance with 
+privacy laws like GDPR and CCPA.
+
+## Key Features
+- **Data Integration**: Connects to Gmail, Google Calendar, and Plaid APIs to pull emails, calendar events, and financial transactions.
+- **Dual Privacy Options**:
+  - "Raw Data" Mode: Stores and processes full, encrypted data for detailed LLM responses.
+  - "Summarized/Anonymized Data" Mode: Summarizes and anonymizes data (e.g., replacing names with "colleague," masking financial details) to protect privacy while still providing useful context.
+- **Cloud-Based Vector Database**: Uses Qdrant in the cloud to store temporary embeddings, with data expiring after 24 hours or on user logout.
+- **RAG Integration**: Implements Retrieval-Augmented Generation to retrieve relevant data from the vector database and feed it to LLMs (e.g., OpenAI GPT-4) for accurate responses.
+- **Privacy and Security**:
+  - End-to-end encryption for raw data using client-side encryption (Web Crypto API).
+  - Anonymization of sensitive information in summarized mode.
+  - Opt-out of LLM training and data storage by third-party providers.
+  - User consent prompts and data deletion options.
+- **User Interface**: A web-based frontend (e.g., React) with settings to toggle privacy modes and view data processing status.
+
+## Project Architecture
+
+
+## Key Components
+- **Data Pullers**: Modules to connect to Gmail, Google Calendar, and Plaid APIs using OAuth tokens.
+- **Data Processors**: Logic to handle raw data encryption, summarization (e.g., using `summarize-text` or OpenAI), and anonymization (e.g., using spaCy.js or regex).
+- **Vector Database Manager**: Code to interact with Qdrant, generate embeddings (OpenAI `text-embedding-ada-002`), and manage TTL for temporary storage.
+- **RAG Pipeline**: System to embed user queries, query Qdrant, and pass retrieved data to LLMs.
+- **Privacy Controls**: Frontend and backend logic for user consent, privacy mode toggles, and data deletion.
+
+## Dependencies
+
+
+## File Structure
+
+
+
+## Development Goals
+- Ensure scalability for multiple users by leveraging Qdrant’s cloud capabilities.
+- Maximize privacy by keeping sensitive operations (encryption, summarization) client-side and minimizing cloud exposure.
+- Provide a user-friendly experience with clear privacy controls and feedback.
+- Test thoroughly for security vulnerabilities, data leaks, and performance bottlenecks.
+
+## Assumptions
+
+
+If any assumptions are incorrect or unclear, please pause and ask for clarification before proceeding. Provide a detailed implementation plan, including code snippets for key components (e.g., privacy toggle, RAG pipeline), file structures, and step-by-step instructions to integrate this into the existing webapp.
